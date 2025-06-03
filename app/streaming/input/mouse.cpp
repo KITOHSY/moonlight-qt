@@ -5,6 +5,7 @@
 #include "streaming/streamutils.h"
 #include <qfile.h>
 #include <qfileinfo.h>
+#include <windows.h>
 
 // SdlInputHandler.cpp
 void SdlInputHandler::handleFileDropEvent(SDL_DropEvent* event) {
@@ -12,7 +13,7 @@ void SdlInputHandler::handleFileDropEvent(SDL_DropEvent* event) {
         std::string filePath(event->file);
 
         // replace '\' to '\\'
-        std::string replacedPath;
+        /* std::string replacedPath;
         replacedPath.reserve(filePath.size() * 2); // reserve enough memory
 
         for (char ch : filePath) {
@@ -21,12 +22,12 @@ void SdlInputHandler::handleFileDropEvent(SDL_DropEvent* event) {
             } else {
                 replacedPath += ch;
             }
-        }
+        } */
 
         // check out
-        SDL_Log("Replaced file path: %s", replacedPath.c_str());
+        SDL_Log("Replaced file path: %s", filePath.c_str());
 
-        LiSendFileToServer(replacedPath.c_str());
+        LiSendFileToServer(filePath.c_str());
 
         SDL_free(event->file);
         // Important! Must free the memory SDL allocated.
