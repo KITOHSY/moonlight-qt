@@ -3,6 +3,37 @@
 #include <Limelight.h>
 #include "SDL_compat.h"
 #include "streaming/streamutils.h"
+#include <qfile.h>
+#include <qfileinfo.h>
+
+// SdlInputHandler.cpp
+void SdlInputHandler::handleFileDropEvent(SDL_DropEvent* event) {
+    if (event->file) {
+        std::string filePath(event->file);
+
+        // replace '\' to '\\'
+        std::string replacedPath;
+        replacedPath.reserve(filePath.size() * 2); // reserve enough memory
+
+        for (char ch : filePath) {
+            if (ch == '\\') {
+                replacedPath += "\\\\";
+            } else {
+                replacedPath += ch;
+            }
+        }
+
+        // check out
+        SDL_Log("Replaced file path: %s", replacedPath.c_str());
+
+        LiSendFileToServer(replacedPath.c_str());
+
+        SDL_free(event->file);
+        // Important! Must free the memory SDL allocated.
+        // File handle process
+    }
+}
+
 
 void SdlInputHandler::handleMouseButtonEvent(SDL_MouseButtonEvent* event)
 {

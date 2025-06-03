@@ -92,6 +92,8 @@ public:
 
     void handleKeyEvent(SDL_KeyboardEvent* event);
 
+    void handleFileDropEvent(SDL_DropEvent* event);
+
     void handleMouseButtonEvent(SDL_MouseButtonEvent* event);
 
     void handleMouseMotionEvent(SDL_MouseMotionEvent* event);

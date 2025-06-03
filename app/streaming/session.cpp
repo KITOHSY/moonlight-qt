@@ -2010,6 +2010,14 @@ void Session::execInternal()
     // Hijack this thread to be the SDL main thread. We have to do this
     // because we want to suspend all Qt processing until the stream is over.
     SDL_Event event;
+
+
+    //2025.5.30.
+    SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
+    SDL_EventState(SDL_DROPTEXT, SDL_ENABLE);   // If text drop is needed
+    SDL_EventState(SDL_DROPBEGIN, SDL_ENABLE);
+    SDL_EventState(SDL_DROPCOMPLETE, SDL_ENABLE);
+
     for (;;) {
 #if SDL_VERSION_ATLEAST(2, 0, 18) && !defined(STEAM_LINK)
         // SDL 2.0.18 has a proper wait event implementation that uses platform
@@ -2292,6 +2300,11 @@ void Session::execInternal()
             SDL_AtomicUnlock(&m_DecoderLock);
             break;
 
+
+        //2025.5.30.
+        case SDL_DROPFILE:
+            m_InputHandler->handleFileDropEvent(&event.drop);
+            break;
         case SDL_KEYUP:
         case SDL_KEYDOWN:
             presence.runCallbacks();
