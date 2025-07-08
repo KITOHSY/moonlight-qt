@@ -4,10 +4,12 @@
 #include "settings/mappingmanager.h"
 #include "path.h"
 #include "utils.h"
+#include "filetransferworker.h"
 
 #include <QtGlobal>
 #include <QDir>
 #include <QGuiApplication>
+#include <QThread>
 
 SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, int streamHeight)
     : m_MultiController(prefs.multiController),
@@ -443,5 +445,29 @@ void SdlInputHandler::handleTouchFingerEvent(SDL_TouchFingerEvent* event)
     }
     else {
         handleRelativeFingerEvent(event);
+    }
+}
+
+void SdlInputHandler::handleDragAndDropEvent(SDL_DropEvent* event)
+{
+    if (event->type == SDL_DROPFILE || event->type == SDL_DROPTEXT) {
+        QString droppedData = QString::fromUtf8(event->file);
+        qDebug() << "드롭된 파일:" << droppedData;
+        
+        // 스레드 생성
+        QThread* thread = new QThread;
+        FileTransferWorker* worker = new FileTransferWorker(droppedData);
+
+        worker->moveToThread(thread);
+
+        // 스레드와 워커 연결
+        QObject::connect(thread, &QThread::started, worker, &FileTransferWorker::process);
+        QObject::connect(worker, &FileTransferWorker::finished, thread, &QThread::quit);
+        QObject::connect(worker, &FileTransferWorker::finished, worker, &QObject::deleteLater);
+        QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+
+        thread->start();
+
+        SDL_free(event->file);
     }
 }

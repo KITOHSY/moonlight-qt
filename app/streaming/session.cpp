@@ -2299,6 +2299,11 @@ void Session::execInternal()
             presence.runCallbacks();
             m_InputHandler->handleKeyEvent(&event.key);
             break;
+
+        case SDL_DROPFILE:
+            presence.runCallbacks();
+            m_InputHandler->handleDragAndDropEvent(&event.drop);
+            break;
         case SDL_MOUSEBUTTONDOWN:
         case SDL_MOUSEBUTTONUP:
             presence.runCallbacks();
