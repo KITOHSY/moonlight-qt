@@ -58,6 +58,7 @@ SOURCES += \
     $$COMMON_C_DIR/src/ConnectionTester.c \
     $$COMMON_C_DIR/src/ControlStream.c \
     $$COMMON_C_DIR/src/FakeCallbacks.c \
+    $$COMMON_C_DIR/src/FileStream.c \
     $$COMMON_C_DIR/src/InputStream.c \
     $$COMMON_C_DIR/src/LinkedBlockingQueue.c \
     $$COMMON_C_DIR/src/Misc.c \
@@ -73,7 +74,8 @@ SOURCES += \
     $$COMMON_C_DIR/src/VideoDepacketizer.c \
     $$COMMON_C_DIR/src/VideoStream.c
 HEADERS += \
-    $$COMMON_C_DIR/src/Limelight.h
+    $$COMMON_C_DIR/src/Limelight.h \
+    moonlight-common-c/src/File.h
 INCLUDEPATH += \
     $$RS_DIR \
     $$ENET_DIR/include \
