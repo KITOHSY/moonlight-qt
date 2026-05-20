@@ -111,11 +111,32 @@
       <Files Include="$(var.DeployDir)\**" />
     </ComponentGroup>
 
+    <!--
+      SmartClassroom T13 — register the moonlight:// URL scheme so that
+      `moonlight://connect?token=...&host-id=...&host=...&port=...` URLs
+      (issued by the SmartClassroom Broker frontend) launch this binary
+      with the URL as argv[1]. main.cpp's URL handler expands the URL
+      into the `connect` CLI subcommand and dispatches into ComputerManager.
+    -->
+    <Component Id="MoonlightUrlProtocol" Directory="INSTALLFOLDER" Guid="9d0c98a1-3c4f-4f5a-8a7b-2c4d51e7f3a1">
+      <RegistryKey Root="HKCR" Key="moonlight">
+        <RegistryValue Type="string" Value="URL:Moonlight Protocol" KeyPath="yes" />
+        <RegistryValue Name="URL Protocol" Type="string" Value="" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key="moonlight\DefaultIcon">
+        <RegistryValue Type="string" Value="[#MoonlightExe],0" />
+      </RegistryKey>
+      <RegistryKey Root="HKCR" Key="moonlight\shell\open\command">
+        <RegistryValue Type="string" Value="&quot;[#MoonlightExe]&quot; &quot;%1&quot;" />
+      </RegistryKey>
+    </Component>
+
     <Feature Id="ProductFeature" Title="Moonlight" Level="1" ConfigurableDirectory="INSTALLFOLDER">
       <ComponentRef Id="Moonlight" />
       <ComponentRef Id="MoonlightShortcuts" />
       <ComponentRef Id="MoonlightDesktopShortcutState" />
       <ComponentRef Id="MoonlightDesktopShortcut" />
+      <ComponentRef Id="MoonlightUrlProtocol" />
       <ComponentGroupRef Id="MoonlightDependencies" />
     </Feature>
 
