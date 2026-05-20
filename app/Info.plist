@@ -44,5 +44,19 @@
 	<string>VERSION</string>
 	<key>CFBundleDisplayName</key>
 	<string>Moonlight</string>
+	<!-- SmartClassroom T13 — register moonlight:// URL scheme so LaunchServices
+	     hands moonlight://connect?... URLs from the SmartClassroom Broker
+	     frontend off to this .app via QFileOpenEvent. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.moonlight-stream.Moonlight.url</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>moonlight</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
