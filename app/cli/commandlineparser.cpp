@@ -168,6 +168,7 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
         "  quit            Quit the currently running app\n"
         "  stream          Start streaming an app\n"
         "  pair            Pair a new host\n"
+        "  connect         Connect to a host using a SmartClassroom broker token\n"
         "\n"
         "See 'moonlight <action> --help' for help of specific action."
     );
@@ -199,6 +200,8 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
                 return PairRequested;
             } else if (action == "list") {
                 return ListRequested;
+            } else if (action == "connect") {
+                return ConnectRequested;
             }
         }
 
@@ -597,4 +600,94 @@ bool ListCommandLineParser::isPrintCSV() const
 bool ListCommandLineParser::isVerbose() const
 {
     return m_Verbose;
+}
+
+ConnectCommandLineParser::ConnectCommandLineParser()
+    : m_Port(0),
+      m_HostId(0)
+{
+}
+
+ConnectCommandLineParser::~ConnectCommandLineParser()
+{
+}
+
+void ConnectCommandLineParser::parse(const QStringList &args)
+{
+    CommandLineParser parser;
+    parser.setupCommonOptions();
+    parser.setApplicationDescription(
+        "\n"
+        "Connect to a host using a SmartClassroom broker-issued one-shot token.\n"
+        "\n"
+        "The host/port pair identifies (or auto-adds) the Sunshine host, and\n"
+        "the connect token is carried into the pairing/streaming flow so the\n"
+        "user is not prompted for a PIN. Issued by the SmartClassroom Broker\n"
+        "via the moonlight:// URL handler; not intended to be typed by hand."
+    );
+    parser.addPositionalArgument("connect", "connect to host with broker token");
+    parser.addPositionalArgument("host", "Host computer name or IP address", "<host>");
+    parser.addValueOption("port", "Sunshine HTTPS port (default 47989)");
+    parser.addValueOption("connect-token", "SmartClassroom broker one-shot token");
+    parser.addValueOption("host-id", "SmartClassroom broker host id (metadata)");
+
+    if (!parser.parse(args)) {
+        parser.showError(parser.errorText());
+    }
+
+    parser.handleUnknownOptions();
+
+    // This method will not return and terminates the process if --version or
+    // --help is specified
+    parser.handleHelpAndVersionOptions();
+
+    // Verify that host has been provided
+    auto posArgs = parser.positionalArguments();
+    if (posArgs.length() < 2) {
+        parser.showError("Host not provided");
+    }
+    m_Host = parser.positionalArguments().at(1);
+
+    if (parser.isSet("port")) {
+        m_Port = parser.getIntOption("port");
+        if (!inRange(m_Port, 1, 65535)) {
+            parser.showError("Port must be between 1 and 65535");
+        }
+    }
+
+    if (parser.isSet("connect-token")) {
+        m_ConnectToken = parser.value("connect-token");
+        // The broker issues secrets.token_urlsafe(32) which yields ~43 chars;
+        // we accept anything >=16 to leave room for future token formats.
+        if (m_ConnectToken.length() < 16) {
+            parser.showError("connect-token is too short");
+        }
+    }
+
+    if (parser.isSet("host-id")) {
+        m_HostId = parser.getIntOption("host-id");
+        if (m_HostId <= 0) {
+            parser.showError("host-id must be a positive integer");
+        }
+    }
+}
+
+QString ConnectCommandLineParser::getHost() const
+{
+    return m_Host;
+}
+
+int ConnectCommandLineParser::getPort() const
+{
+    return m_Port;
+}
+
+QString ConnectCommandLineParser::getConnectToken() const
+{
+    return m_ConnectToken;
+}
+
+int ConnectCommandLineParser::getHostId() const
+{
+    return m_HostId;
 }
