@@ -411,14 +411,43 @@ static QLocalServer* scT13StartSingleInstanceServer(QObject* parent)
     return server;
 }
 
-// macOS URL handler — receives QFileOpenEvent via Qt's url handler dispatch.
-// Receiver-side dispatch into ComputerManager is wired in the follow-up
-// ComputerManager connect-entry-point patch; v1 stub just logs.
+// Hand a parsed moonlight://connect URL off to ComputerManager. This is the
+// single entry point shared by (a) the macOS QFileOpenEvent handler, (b) the
+// first-instance receiver routing forwarded URLs back through
+// QDesktopServices::openUrl, and (c) the ConnectRequested switch arm below
+// (via the expanded CLI args).
+static void scT13DispatchMoonlightUrl(const QUrl& url)
+{
+    if (!url.isValid() || url.host().compare("connect", Qt::CaseInsensitive) != 0) {
+        qWarning() << "T13: ignoring unrecognized moonlight:// URL:" << url.toString();
+        return;
+    }
+    QUrlQuery q(url);
+    const QString token  = q.queryItemValue("token");
+    const QString host   = q.queryItemValue("host");
+    const QString hostId = q.queryItemValue("host-id");
+    const QString port   = q.queryItemValue("port");
+    if (host.isEmpty()) {
+        qWarning() << "T13: moonlight:// URL missing host parameter:" << url.toString();
+        return;
+    }
+    bool portOk = !port.isEmpty();
+    int portInt = portOk ? port.toInt(&portOk) : 0;
+    bool hostIdOk = !hostId.isEmpty();
+    int hostIdInt = hostIdOk ? hostId.toInt(&hostIdOk) : 0;
+    qInfo() << "T13: dispatching moonlight://connect host=" << host
+            << "port=" << (portOk ? portInt : 0)
+            << "host-id=" << (hostIdOk ? hostIdInt : 0)
+            << "token-prefix=" << token.left(8);
+    ComputerManager::stashPendingConnect(host, portOk ? portInt : 0,
+                                         token, hostIdOk ? hostIdInt : 0);
+}
+
+// macOS QFileOpenEvent + single-instance forward both flow through here.
 static void scT13RegisterMoonlightUrlHandler()
 {
     QDesktopServices::setUrlHandler("moonlight", [](const QUrl& url) {
-        qInfo() << "T13: moonlight:// URL received:" << url.toString();
-        // Future patch dispatches into ComputerManager::requestConnect here.
+        scT13DispatchMoonlightUrl(url);
     });
 }
 
@@ -933,11 +962,12 @@ int main(int argc, char *argv[])
     case GlobalCommandLineParser::ConnectRequested:
         {
             // SmartClassroom T13 — moonlight:// URL or `connect` CLI entry.
-            // v1 lands the user on PcView while the host/token are recorded
-            // for follow-up handling. The actual dispatch into ComputerManager
-            // (host auto-add + pending-token storage) is wired in the next
-            // patch in this series; this case stays a logging stub so the
-            // build is clean even when only the URL plumbing is applied.
+            // Lands on PcView while the host/token are handed off to
+            // ComputerManager. ComputerManager auto-adds the host if it's
+            // not already known and stamps the broker token / host-id on
+            // the resulting NvComputer (T14 will inject the token into the
+            // NvHTTP Bearer header so pairing/streaming proceed without a
+            // user-entered PIN).
             initialView = "qrc:/gui/PcView.qml";
             ConnectCommandLineParser connectParser;
             connectParser.parse(scT13ProcessedArgs);
@@ -945,6 +975,10 @@ int main(int argc, char *argv[])
                     << "port=" << connectParser.getPort()
                     << "host-id=" << connectParser.getHostId()
                     << "token-prefix=" << connectParser.getConnectToken().left(8);
+            ComputerManager::stashPendingConnect(connectParser.getHost(),
+                                                 connectParser.getPort(),
+                                                 connectParser.getConnectToken(),
+                                                 connectParser.getHostId());
             break;
         }
     }

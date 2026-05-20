@@ -144,6 +144,11 @@ private:
     NvComputer* m_Computer;
 };
 
+// SmartClassroom T13 — static pending-connect bookkeeping.
+QMutex ComputerManager::s_StashedConnectsLock;
+QList<ComputerManager::PendingConnect> ComputerManager::s_StashedConnects;
+QPointer<ComputerManager> ComputerManager::s_ActiveInstance;
+
 ComputerManager::ComputerManager(StreamingPreferences* prefs)
     : m_Prefs(prefs),
       m_PollingRef(0),
@@ -184,10 +189,21 @@ ComputerManager::ComputerManager(StreamingPreferences* prefs)
     // while quitting, however this is a one time signal - additional
     // requests would not be aborted and block termination.
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, &ComputerManager::handleAboutToQuit);
+
+    // SmartClassroom T13 — claim the active-instance slot and drain any
+    // connect requests stashed by main.cpp before this instance existed.
+    s_ActiveInstance = this;
+    flushStashedConnects();
 }
 
 ComputerManager::~ComputerManager()
 {
+    // SmartClassroom T13 — release the active-instance slot so any
+    // subsequent stashPendingConnect calls fall back to the static queue.
+    if (s_ActiveInstance.data() == this) {
+        s_ActiveInstance.clear();
+    }
+
     // Stop the delayed flush thread before acquiring the lock in write mode
     // to avoid deadlocking with a flush that needs the lock in read mode.
     {
@@ -463,8 +479,137 @@ void ComputerManager::handleComputerStateChanged(NvComputer* computer)
         emit quitAppCompleted(QVariant());
     }
 
+    // SmartClassroom T13 — if we auto-added this host for a moonlight://
+    // connect URL, stamp the broker token/host-id on it now that polling
+    // has resolved its addresses.
+    onPendingConnectStateChanged(computer);
+
     // Save updates to this host
     saveHost(computer);
+}
+
+QString ComputerManager::pendingConnectKey(const QString& address, int port)
+{
+    return QStringLiteral("%1:%2").arg(address).arg(port);
+}
+
+void ComputerManager::stashPendingConnect(QString address, int port,
+                                          QString connectToken, int hostId)
+{
+    QMutexLocker lock(&s_StashedConnectsLock);
+    if (!s_ActiveInstance.isNull()) {
+        ComputerManager* inst = s_ActiveInstance.data();
+        lock.unlock();
+        // Active instance lives on the main thread (QML singleton lambda is
+        // invoked there), and T13 callers (main.cpp ConnectRequested arm and
+        // the QDesktopServices URL handler) are also on the main thread, so
+        // a direct call is safe.
+        inst->requestConnect(address, port, connectToken, hostId);
+        return;
+    }
+    s_StashedConnects.append(PendingConnect{address, port, connectToken, hostId});
+}
+
+void ComputerManager::flushStashedConnects()
+{
+    QList<PendingConnect> drained;
+    {
+        QMutexLocker lock(&s_StashedConnectsLock);
+        drained = s_StashedConnects;
+        s_StashedConnects.clear();
+    }
+    for (const PendingConnect& pc : drained) {
+        requestConnect(pc.address, pc.port, pc.connectToken, pc.hostId);
+    }
+}
+
+void ComputerManager::requestConnect(QString address, int port,
+                                     QString connectToken, int hostId)
+{
+    if (address.isEmpty()) {
+        qWarning() << "T13: requestConnect called with empty address — ignoring";
+        return;
+    }
+    if (port <= 0) {
+        port = DEFAULT_HTTP_PORT;
+    }
+
+    // First pass: see if we already know this host by any of its addresses.
+    NvComputer* matched = nullptr;
+    {
+        QReadLocker lock(&m_Lock);
+        for (NvComputer* c : m_KnownHosts) {
+            QReadLocker cLock(&c->lock);
+            auto matchesAddr = [&](const NvAddress& a) {
+                return !a.isNull() && a.address() == address;
+            };
+            if (matchesAddr(c->manualAddress) || matchesAddr(c->localAddress) ||
+                matchesAddr(c->remoteAddress) || matchesAddr(c->ipv6Address) ||
+                matchesAddr(c->activeAddress)) {
+                matched = c;
+                break;
+            }
+        }
+    }
+    if (matched != nullptr) {
+        QWriteLocker cLock(&matched->lock);
+        matched->pendingConnectToken = connectToken;
+        matched->pendingHostId = hostId;
+        qInfo() << "T13: stamped pending connect on known host" << matched->name;
+        return;
+    }
+
+    // Otherwise queue the token for the address and trigger an addNewHost.
+    {
+        QMutexLocker lock(&m_PendingConnectLock);
+        PendingConnect pc{address, port, connectToken, hostId};
+        m_PendingTokensByAddress[pendingConnectKey(address, port)] = pc;
+    }
+    qInfo() << "T13: requesting addNewHost for" << address << "port" << port
+            << "host-id=" << hostId;
+    addNewHost(NvAddress(address, static_cast<uint16_t>(port)), false);
+}
+
+void ComputerManager::onPendingConnectStateChanged(NvComputer* computer)
+{
+    if (computer == nullptr) {
+        return;
+    }
+    QStringList candidateKeys;
+    {
+        QReadLocker cLock(&computer->lock);
+        auto appendKey = [&](const NvAddress& a) {
+            if (!a.isNull()) {
+                candidateKeys.append(pendingConnectKey(a.address(), a.port()));
+            }
+        };
+        appendKey(computer->manualAddress);
+        appendKey(computer->localAddress);
+        appendKey(computer->remoteAddress);
+        appendKey(computer->ipv6Address);
+        appendKey(computer->activeAddress);
+    }
+    PendingConnect found;
+    bool foundOne = false;
+    {
+        QMutexLocker lock(&m_PendingConnectLock);
+        for (const QString& key : candidateKeys) {
+            auto it = m_PendingTokensByAddress.find(key);
+            if (it != m_PendingTokensByAddress.end()) {
+                found = it.value();
+                foundOne = true;
+                m_PendingTokensByAddress.erase(it);
+                break;
+            }
+        }
+    }
+    if (foundOne) {
+        QWriteLocker cLock(&computer->lock);
+        computer->pendingConnectToken = found.connectToken;
+        computer->pendingHostId = found.hostId;
+        qInfo() << "T13: stamped pending connect on host" << computer->name
+                << "after polling resolved it";
+    }
 }
 
 QVector<NvComputer*> ComputerManager::getComputers()

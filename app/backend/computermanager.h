@@ -17,6 +17,7 @@
 #include <QTimer>
 #include <QMutex>
 #include <QWaitCondition>
+#include <QPointer>
 
 class ComputerManager;
 
@@ -245,6 +246,20 @@ public:
 
     void clientSideAttributeUpdated(NvComputer* computer);
 
+    // SmartClassroom T13 — moonlight:// connect entry point. If `address` is
+    // already in m_KnownHosts the broker token / host-id are stamped on the
+    // matching NvComputer immediately; otherwise addNewHost is invoked and
+    // the (token, hostId) are stashed in m_PendingTokensByAddress so the
+    // computerStateChanged callback below can stamp them once polling
+    // resolves the host.
+    void requestConnect(QString address, int port, QString connectToken, int hostId);
+
+    // Stash a connect request received before any ComputerManager instance
+    // exists. main.cpp calls this from the ConnectRequested switch arm; the
+    // QML singleton lambda constructs ComputerManager later, and the
+    // constructor flushes any stashed requests onto the live instance.
+    static void stashPendingConnect(QString address, int port, QString connectToken, int hostId);
+
 signals:
     void computerStateChanged(NvComputer* computer);
 
@@ -284,4 +299,22 @@ private:
     QMutex m_DelayedFlushMutex; // Lock ordering: Must never be acquired while holding NvComputer lock
     QWaitCondition m_DelayedFlushCondition;
     bool m_NeedsDelayedFlush;
+
+    // SmartClassroom T13 — moonlight:// pending-connect bookkeeping.
+    struct PendingConnect {
+        QString address;
+        int port;
+        QString connectToken;
+        int hostId;
+    };
+    QMutex m_PendingConnectLock;
+    QMap<QString, PendingConnect> m_PendingTokensByAddress;  // key: "ip:port"
+
+    void flushStashedConnects();
+    void onPendingConnectStateChanged(NvComputer* computer);
+    static QString pendingConnectKey(const QString& address, int port);
+
+    static QMutex s_StashedConnectsLock;
+    static QList<PendingConnect> s_StashedConnects;
+    static QPointer<ComputerManager> s_ActiveInstance;
 };
