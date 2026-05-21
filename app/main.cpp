@@ -13,7 +13,6 @@
 #include <QTemporaryFile>
 #include <QRegularExpression>
 // SmartClassroom T13 — moonlight:// URL handler + single-instance forwarding
-#include <QDesktopServices>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QLocalServer>
@@ -307,8 +306,11 @@ LONG WINAPI UnhandledExceptionHandler(struct _EXCEPTION_POINTERS *ExceptionInfo)
 // invocations share a single dispatch path.
 //
 // Windows and Linux deliver the URL as a regular argv entry to a freshly-
-// spawned process. macOS delivers it via QFileOpenEvent after the event loop
-// starts; QDesktopServices::setUrlHandler keeps that path working.
+// spawned process — which is what we handle here. macOS delivers URLs to an
+// already-running .app via QFileOpenEvent (no argv), and intercepting that
+// path requires QDesktopServices::setUrlHandler. Qt 6's setUrlHandler only
+// accepts (scheme, QObject*, slot) — no lambda overload — so wiring it up
+// needs a small Q_OBJECT receiver class. That work is deferred to v1.1.
 #define SC_T13_SINGLE_INSTANCE_KEY "Moonlight-SingleInstance-v1"
 
 static QStringList scT13ExpandMoonlightConnectUrl(const QStringList& args)
@@ -402,7 +404,14 @@ static QLocalServer* scT13StartSingleInstanceServer(QObject* parent)
                 in >> forwardedArgs;
                 for (const QString& arg : forwardedArgs) {
                     if (arg.startsWith("moonlight://", Qt::CaseInsensitive)) {
-                        QDesktopServices::openUrl(QUrl(arg));
+                        // Dispatch directly into the same helper the URL-on-
+                        // argv path uses. We don't bounce through
+                        // QDesktopServices::openUrl because we'd then need a
+                        // setUrlHandler registration, and Qt 6's setUrlHandler
+                        // signature requires a QObject* + slot pair (no
+                        // lambda overload) — that path is deferred to v1.1
+                        // along with the macOS QFileOpenEvent receiver.
+                        scT13DispatchMoonlightUrl(QUrl(arg));
                     }
                 }
             });
@@ -411,11 +420,11 @@ static QLocalServer* scT13StartSingleInstanceServer(QObject* parent)
     return server;
 }
 
-// Hand a parsed moonlight://connect URL off to ComputerManager. This is the
-// single entry point shared by (a) the macOS QFileOpenEvent handler, (b) the
-// first-instance receiver routing forwarded URLs back through
-// QDesktopServices::openUrl, and (c) the ConnectRequested switch arm below
-// (via the expanded CLI args).
+// Hand a parsed moonlight://connect URL off to ComputerManager. Shared by
+// (a) the single-instance receiver routing forwarded URLs from a second
+// instance, and (b) the ConnectRequested switch arm below (via the expanded
+// CLI args). The macOS QFileOpenEvent channel (which would also need to land
+// here) is deferred to v1.1 — see scT13RegisterMoonlightUrlHandler note below.
 static void scT13DispatchMoonlightUrl(const QUrl& url)
 {
     if (!url.isValid() || url.host().compare("connect", Qt::CaseInsensitive) != 0) {
@@ -443,13 +452,14 @@ static void scT13DispatchMoonlightUrl(const QUrl& url)
                                          token, hostIdOk ? hostIdInt : 0);
 }
 
-// macOS QFileOpenEvent + single-instance forward both flow through here.
-static void scT13RegisterMoonlightUrlHandler()
-{
-    QDesktopServices::setUrlHandler("moonlight", [](const QUrl& url) {
-        scT13DispatchMoonlightUrl(url);
-    });
-}
+// v1.1 follow-up: macOS QFileOpenEvent channel. On macOS, when the .app is
+// already running and the user clicks a moonlight:// link a second time,
+// LaunchServices delivers the URL via QFileOpenEvent instead of argv — and
+// only QDesktopServices::setUrlHandler can intercept it. Qt 6's
+// setUrlHandler requires (scheme, QObject* receiver, const char* slot), so
+// activating that path needs a tiny Q_OBJECT receiver class (header + cpp +
+// .pro update). Windows/Linux v1 don't need it because argv carries every
+// URL invocation; deferring keeps the v1 surface small.
 
 int main(int argc, char *argv[])
 {
@@ -739,9 +749,9 @@ int main(int argc, char *argv[])
     //    Moonlight window for an OS-level URL click. Other CLI invocations
     //    fall through to per-instance handling (forwarding CLI re-entry is a
     //    v1.1 follow-up).
-    // 2) Register the macOS URL handler so a deferred QFileOpenEvent lands
-    //    in our dispatch path.
-    // 3) Start a local server so a future second instance can find us.
+    // 2) Start a local server so a future second instance can find us.
+    //    (macOS QFileOpenEvent registration is deferred to v1.1 — see the
+    //    note next to scT13DispatchMoonlightUrl below.)
     {
         const QStringList earlyArgs = app.arguments();
         bool hasMoonlightUrl = false;
@@ -755,7 +765,6 @@ int main(int argc, char *argv[])
             return 0;
         }
     }
-    scT13RegisterMoonlightUrlHandler();
     QLocalServer* scT13SingleInstanceServer = scT13StartSingleInstanceServer(&app);
     Q_UNUSED(scT13SingleInstanceServer);
 
