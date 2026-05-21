@@ -383,6 +383,11 @@ static bool scT13TryForwardToRunningInstance(const QStringList& args)
 // invocations) are not dispatched in T13 v1 — the second instance returns 0
 // and the user gets a no-op; the KPI path is the URL form, and CLI re-entry
 // forwarding is a v1.1 follow-up.
+//
+// Forward declaration so the receiver lambda below can call into
+// scT13DispatchMoonlightUrl, which is defined further down.
+static void scT13DispatchMoonlightUrl(const QUrl& url);
+
 static QLocalServer* scT13StartSingleInstanceServer(QObject* parent)
 {
     // Drop any stale socket from a previous unclean shutdown.
