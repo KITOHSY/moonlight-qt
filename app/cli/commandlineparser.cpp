@@ -630,6 +630,7 @@ void ConnectCommandLineParser::parse(const QStringList &args)
     parser.addValueOption("port", "Sunshine HTTPS port (default 47989)");
     parser.addValueOption("connect-token", "SmartClassroom broker one-shot token");
     parser.addValueOption("host-id", "SmartClassroom broker host id (metadata)");
+    parser.addValueOption("broker", "SmartClassroom broker base URL (for auto-pairing)");
 
     if (!parser.parse(args)) {
         parser.showError(parser.errorText());
@@ -670,6 +671,10 @@ void ConnectCommandLineParser::parse(const QStringList &args)
             parser.showError("host-id must be a positive integer");
         }
     }
+
+    if (parser.isSet("broker")) {
+        m_BrokerUrl = parser.value("broker");
+    }
 }
 
 QString ConnectCommandLineParser::getHost() const
@@ -690,4 +695,9 @@ QString ConnectCommandLineParser::getConnectToken() const
 int ConnectCommandLineParser::getHostId() const
 {
     return m_HostId;
+}
+
+QString ConnectCommandLineParser::getBrokerUrl() const
+{
+    return m_BrokerUrl;
 }

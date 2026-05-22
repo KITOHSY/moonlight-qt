@@ -62,6 +62,14 @@ ApplicationWindow {
             unmappedGamepadDialog.unmappedGamepads = SystemProperties.unmappedGamepads
             unmappedGamepadDialog.open()
         }
+
+        // SmartClassroom T14 — moonlight:// auto-connect (pair + stream) UI.
+        // ComputerManager runs the flow; we only show progress and hand the
+        // ready Session off to StreamSegue.
+        ComputerManager.autoConnectStarted.connect(scAutoConnectStarted)
+        ComputerManager.autoConnectStageChanged.connect(scAutoConnectStageChanged)
+        ComputerManager.autoConnectFailed.connect(scAutoConnectFailed)
+        ComputerManager.autoStreamSessionReady.connect(scAutoStreamSessionReady)
     }
   
     // This configures the maximum width of the singleton attached QML ToolTip. If left unconstrained,
@@ -202,6 +210,38 @@ ApplicationWindow {
             // Create a new item
             stackView.push(url)
         }
+    }
+
+    // SmartClassroom T14 — moonlight:// auto-connect handlers. The C++
+    // ComputerManager drives pairing + app discovery; these just reflect
+    // progress and perform the QML-side StreamSegue hand-off.
+    function scAutoConnectStarted(hostName) {
+        autoConnectPopup.stageText = qsTr("Connecting to %1...").arg(hostName)
+        autoConnectPopup.open()
+    }
+
+    function scAutoConnectStageChanged(stage) {
+        autoConnectPopup.stageText = stage
+    }
+
+    function scAutoConnectFailed(message) {
+        autoConnectPopup.close()
+        autoConnectErrorDialog.text = message
+        autoConnectErrorDialog.open()
+    }
+
+    function scAutoStreamSessionReady(appName, session) {
+        autoConnectPopup.close()
+
+        // Mirror CliStartStreamSegue.onSessionCreated: push StreamSegue with
+        // the ready Session. quitAfter stays false so the stream ends back on
+        // PcView rather than quitting Moonlight outright.
+        var component = Qt.createComponent("StreamSegue.qml")
+        var segue = component.createObject(stackView, {
+            "appName": appName,
+            "session": session
+        })
+        stackView.push(segue)
     }
 
     header: ToolBar {
@@ -524,5 +564,52 @@ ApplicationWindow {
                 }
             }
         }
+    }
+
+    // SmartClassroom T14 — modal progress popup shown while a moonlight:// URL
+    // auto-connect (pair + stream) runs. Modal so the user can't race the flow
+    // by also clicking the host tile underneath.
+    Popup {
+        id: autoConnectPopup
+        property string stageText: ""
+
+        modal: true
+        closePolicy: Popup.NoAutoClose
+        padding: 30
+        x: Math.round((parent.width - width) / 2)
+        y: Math.round((parent.height - height) / 2)
+
+        ColumnLayout {
+            anchors.centerIn: parent
+            spacing: 20
+
+            BusyIndicator {
+                Layout.alignment: Qt.AlignHCenter
+                running: autoConnectPopup.visible
+            }
+
+            Label {
+                Layout.alignment: Qt.AlignHCenter
+                Layout.maximumWidth: 400
+                text: autoConnectPopup.stageText
+                font.pointSize: 16
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+            }
+
+            Button {
+                Layout.alignment: Qt.AlignHCenter
+                text: qsTr("Cancel")
+                onClicked: {
+                    ComputerManager.cancelAutoConnect()
+                    autoConnectPopup.close()
+                }
+            }
+        }
+    }
+
+    ErrorMessageDialog {
+        id: autoConnectErrorDialog
+        helpText: ""
     }
 }

@@ -188,7 +188,8 @@ NvPairingManager::saltPin(const QByteArray& salt, QString pin)
 }
 
 NvPairingManager::PairState
-NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverCert)
+NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverCert,
+                       int getServerCertTimeoutMs)
 {
     int serverMajorVersion = NvHTTP::parseQuad(appVersion).at(0);
     qInfo() << "Pairing with server generation:" << serverMajorVersion;
@@ -214,11 +215,14 @@ NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverC
     QByteArray aesKey = QCryptographicHash::hash(saltedPin, hashAlgo).constData();
     aesKey.truncate(16);
 
+    // Phase 1: getservercert. The host holds this response open until the
+    // pairing PIN is supplied, so the timeout is caller-controlled — 0 for
+    // interactive pairing, finite for T14 headless auto-pairing.
     QString getCert = m_Http.openConnectionToString(m_Http.m_BaseUrlHttp,
                                                     "pair",
                                                     "devicename=roth&updateState=1&phrase=getservercert&salt=" +
                                                     salt.toHex() + "&clientcert=" + IdentityManager::get()->getCertificate().toHex(),
-                                                    0);
+                                                    getServerCertTimeoutMs);
     NvHTTP::verifyResponseStatus(getCert);
     if (NvHTTP::getXmlString(getCert, "paired") != "1")
     {

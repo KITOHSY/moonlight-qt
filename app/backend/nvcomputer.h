@@ -115,13 +115,14 @@ public:
     bool isNvidiaServerSoftware;
     // Remember to update isEqualSerialized() when adding fields here!
 
-    // SmartClassroom T13 — pending broker token / host-id from moonlight:// URL.
-    // Ephemeral only; never persisted (raw token on disk would leak it, and
-    // the token expires with the reservation window anyway). T14 will pick
-    // these up to inject `Authorization: Bearer <token>` into NvHTTP and to
-    // pass them through to the pairing flow so the user never sees a PIN.
+    // SmartClassroom T13/T14 — pending broker connect context from moonlight:// URL.
+    // Ephemeral only; never persisted (raw token on disk would leak it, and the
+    // token expires with the reservation window anyway). T14 uses these to
+    // auto-pair via the Broker (POST <pendingBrokerUrl>/api/v1/pairing) and then
+    // auto-stream, so the user never sees a PIN dialog.
     QString pendingConnectToken;
     int pendingHostId = 0;
+    QString pendingBrokerUrl;
 
     // Synchronization
     mutable CopySafeReadWriteLock lock;

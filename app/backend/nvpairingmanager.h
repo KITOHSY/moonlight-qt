@@ -21,8 +21,15 @@ public:
 
     ~NvPairingManager();
 
+    // getServerCertTimeoutMs bounds the phase-1 "getservercert" request only.
+    // That request blocks on the host until the pairing PIN is entered, so the
+    // default 0 (infinite) is correct for interactive pairing where the user
+    // may take their time. SmartClassroom T14 headless auto-pairing passes a
+    // finite value so a never-arriving PIN (e.g. Broker down) fails instead of
+    // hanging Moonlight forever.
     PairState
-    pair(QString appVersion, QString pin, QSslCertificate& serverCert);
+    pair(QString appVersion, QString pin, QSslCertificate& serverCert,
+         int getServerCertTimeoutMs = 0);
 
 private:
     QByteArray

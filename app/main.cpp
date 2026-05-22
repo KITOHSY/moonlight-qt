@@ -331,6 +331,7 @@ static QStringList scT13ExpandMoonlightConnectUrl(const QStringList& args)
         const QString hostId = q.queryItemValue("host-id");
         const QString host   = q.queryItemValue("host");
         const QString port   = q.queryItemValue("port");
+        const QString broker = q.queryItemValue("broker");
         if (host.isEmpty()) {
             qWarning() << "moonlight:// URL missing host parameter:" << arg;
             continue;
@@ -348,6 +349,10 @@ static QStringList scT13ExpandMoonlightConnectUrl(const QStringList& args)
         if (!hostId.isEmpty()) {
             expanded.append("--host-id");
             expanded.append(hostId);
+        }
+        if (!broker.isEmpty()) {
+            expanded.append("--broker");
+            expanded.append(broker);
         }
     }
     return expanded;
@@ -441,6 +446,7 @@ static void scT13DispatchMoonlightUrl(const QUrl& url)
     const QString host   = q.queryItemValue("host");
     const QString hostId = q.queryItemValue("host-id");
     const QString port   = q.queryItemValue("port");
+    const QString broker = q.queryItemValue("broker");
     if (host.isEmpty()) {
         qWarning() << "T13: moonlight:// URL missing host parameter:" << url.toString();
         return;
@@ -452,9 +458,10 @@ static void scT13DispatchMoonlightUrl(const QUrl& url)
     qInfo() << "T13: dispatching moonlight://connect host=" << host
             << "port=" << (portOk ? portInt : 0)
             << "host-id=" << (hostIdOk ? hostIdInt : 0)
-            << "token-prefix=" << token.left(8);
+            << "token-prefix=" << token.left(8)
+            << "broker=" << broker;
     ComputerManager::stashPendingConnect(host, portOk ? portInt : 0,
-                                         token, hostIdOk ? hostIdInt : 0);
+                                         token, hostIdOk ? hostIdInt : 0, broker);
 }
 
 // v1.1 follow-up: macOS QFileOpenEvent channel. On macOS, when the .app is
@@ -976,23 +983,24 @@ int main(int argc, char *argv[])
     case GlobalCommandLineParser::ConnectRequested:
         {
             // SmartClassroom T13 — moonlight:// URL or `connect` CLI entry.
-            // Lands on PcView while the host/token are handed off to
+            // Lands on PcView while the host/token/broker are handed off to
             // ComputerManager. ComputerManager auto-adds the host if it's
-            // not already known and stamps the broker token / host-id on
-            // the resulting NvComputer (T14 will inject the token into the
-            // NvHTTP Bearer header so pairing/streaming proceed without a
-            // user-entered PIN).
+            // not already known and stamps the broker connect context on the
+            // resulting NvComputer (T14 uses it to auto-pair via the Broker
+            // and auto-stream without a user-entered PIN).
             initialView = "qrc:/gui/PcView.qml";
             ConnectCommandLineParser connectParser;
             connectParser.parse(scT13ProcessedArgs);
             qInfo() << "T13 connect requested host=" << connectParser.getHost()
                     << "port=" << connectParser.getPort()
                     << "host-id=" << connectParser.getHostId()
-                    << "token-prefix=" << connectParser.getConnectToken().left(8);
+                    << "token-prefix=" << connectParser.getConnectToken().left(8)
+                    << "broker=" << connectParser.getBrokerUrl();
             ComputerManager::stashPendingConnect(connectParser.getHost(),
                                                  connectParser.getPort(),
                                                  connectParser.getConnectToken(),
-                                                 connectParser.getHostId());
+                                                 connectParser.getHostId(),
+                                                 connectParser.getBrokerUrl());
             break;
         }
     }

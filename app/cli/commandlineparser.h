@@ -101,9 +101,10 @@ private:
 //
 // The host/port pair locate (or auto-add) the Sunshine host; the connect token
 // is a one-shot opaque secret issued by the SmartClassroom Broker and bound to
-// a specific reservation window. T13 only parses + carries the token; the
-// follow-up T14 patch series wires it into the NvHTTP Bearer header so that
-// pairing/streaming proceeds without a user-entered PIN.
+// a specific reservation window. T13 parses + carries the token; the T14 patch
+// series uses it to auto-pair via the Broker (POST <broker>/api/v1/pairing) so
+// pairing/streaming proceeds without a user-entered PIN. The broker URL is the
+// SmartClassroom Broker base used for that auto-pairing call.
 class ConnectCommandLineParser
 {
 public:
@@ -116,10 +117,12 @@ public:
     int getPort() const;
     QString getConnectToken() const;
     int getHostId() const;
+    QString getBrokerUrl() const;
 
 private:
     QString m_Host;
     int m_Port;
     QString m_ConnectToken;
     int m_HostId;
+    QString m_BrokerUrl;
 };

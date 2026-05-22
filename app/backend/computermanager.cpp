@@ -2,6 +2,8 @@
 #include "boxartmanager.h"
 #include "nvhttp.h"
 #include "nvpairingmanager.h"
+#include "scbrokerclient.h"
+#include "streaming/session.h"
 
 #include <Limelight.h>
 #include <QtEndian>
@@ -14,6 +16,17 @@
 
 #define SER_HOSTS "hosts"
 #define SER_HOSTS_BACKUP "hostsbackup"
+
+// SmartClassroom T14 — phase-1 ("getservercert") bound for headless
+// auto-pairing. Generous: the Broker may retry the Sunshine /api/pin relay
+// (T08 exponential backoff), so allow well past the ScBrokerClient transfer
+// timeout before treating a never-arriving PIN as a failure.
+#define SC_HEADLESS_GETSERVERCERT_TIMEOUT_MS 30000
+
+// SmartClassroom T14 — overall auto-connect guard. Bounds headless pairing +
+// the post-pairing app-list poll + margin; if the flow hasn't produced a
+// Session by then it fails and the user falls back to the manual PcView UI.
+#define SC_AUTOCONNECT_TIMEOUT_MS 90000
 
 class PcMonitorThread : public QThread
 {
@@ -189,6 +202,19 @@ ComputerManager::ComputerManager(StreamingPreferences* prefs)
     // while quitting, however this is a one time signal - additional
     // requests would not be aborted and block termination.
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, &ComputerManager::handleAboutToQuit);
+
+    // SmartClassroom T14 — auto-connect / headless-pairing wiring. The broker
+    // client, the timeout guard and every completion leg run on the main
+    // thread, so the auto-connect state needs no extra locking.
+    m_ScBrokerClient = new ScBrokerClient(this);
+    connect(m_ScBrokerClient, &ScBrokerClient::pairingRelayed,
+            this, &ComputerManager::scHandleBrokerPairingRelayed);
+    connect(this, &ComputerManager::autoPairingCompleted,
+            this, &ComputerManager::scHandleAutoPairingCompleted);
+    m_AutoConnectTimer = new QTimer(this);
+    m_AutoConnectTimer->setSingleShot(true);
+    connect(m_AutoConnectTimer, &QTimer::timeout,
+            this, &ComputerManager::scHandleAutoConnectTimeout);
 
     // SmartClassroom T13 — claim the active-instance slot and drain any
     // connect requests stashed by main.cpp before this instance existed.
@@ -484,6 +510,10 @@ void ComputerManager::handleComputerStateChanged(NvComputer* computer)
     // has resolved its addresses.
     onPendingConnectStateChanged(computer);
 
+    // SmartClassroom T14 — drive the auto-connect flow on every host state
+    // change (resolution, online/offline, pairing, app-list refresh).
+    scEvaluateAutoConnect(computer);
+
     // Save updates to this host
     saveHost(computer);
 }
@@ -494,7 +524,8 @@ QString ComputerManager::pendingConnectKey(const QString& address, int port)
 }
 
 void ComputerManager::stashPendingConnect(QString address, int port,
-                                          QString connectToken, int hostId)
+                                          QString connectToken, int hostId,
+                                          QString brokerUrl)
 {
     QMutexLocker lock(&s_StashedConnectsLock);
     if (!s_ActiveInstance.isNull()) {
@@ -504,10 +535,10 @@ void ComputerManager::stashPendingConnect(QString address, int port,
         // invoked there), and T13 callers (main.cpp ConnectRequested arm and
         // the QDesktopServices URL handler) are also on the main thread, so
         // a direct call is safe.
-        inst->requestConnect(address, port, connectToken, hostId);
+        inst->requestConnect(address, port, connectToken, hostId, brokerUrl);
         return;
     }
-    s_StashedConnects.append(PendingConnect{address, port, connectToken, hostId});
+    s_StashedConnects.append(PendingConnect{address, port, connectToken, hostId, brokerUrl});
 }
 
 void ComputerManager::flushStashedConnects()
@@ -519,12 +550,13 @@ void ComputerManager::flushStashedConnects()
         s_StashedConnects.clear();
     }
     for (const PendingConnect& pc : drained) {
-        requestConnect(pc.address, pc.port, pc.connectToken, pc.hostId);
+        requestConnect(pc.address, pc.port, pc.connectToken, pc.hostId, pc.brokerUrl);
     }
 }
 
 void ComputerManager::requestConnect(QString address, int port,
-                                     QString connectToken, int hostId)
+                                     QString connectToken, int hostId,
+                                     QString brokerUrl)
 {
     if (address.isEmpty()) {
         qWarning() << "T13: requestConnect called with empty address — ignoring";
@@ -552,17 +584,23 @@ void ComputerManager::requestConnect(QString address, int port,
         }
     }
     if (matched != nullptr) {
-        QWriteLocker cLock(&matched->lock);
-        matched->pendingConnectToken = connectToken;
-        matched->pendingHostId = hostId;
-        qInfo() << "T13: stamped pending connect on known host" << matched->name;
+        {
+            QWriteLocker cLock(&matched->lock);
+            matched->pendingConnectToken = connectToken;
+            matched->pendingHostId = hostId;
+            matched->pendingBrokerUrl = brokerUrl;
+            qInfo() << "T13: stamped pending connect on known host" << matched->name;
+        }
+        // T14 — a known host may already be online; computerStateChanged won't
+        // fire just from stamping, so kick the auto-connect evaluator now.
+        scEvaluateAutoConnect(matched);
         return;
     }
 
     // Otherwise queue the token for the address and trigger an addNewHost.
     {
         QMutexLocker lock(&m_PendingConnectLock);
-        PendingConnect pc{address, port, connectToken, hostId};
+        PendingConnect pc{address, port, connectToken, hostId, brokerUrl};
         m_PendingTokensByAddress[pendingConnectKey(address, port)] = pc;
     }
     qInfo() << "T13: requesting addNewHost for" << address << "port" << port
@@ -607,6 +645,7 @@ void ComputerManager::onPendingConnectStateChanged(NvComputer* computer)
         QWriteLocker cLock(&computer->lock);
         computer->pendingConnectToken = found.connectToken;
         computer->pendingHostId = found.hostId;
+        computer->pendingBrokerUrl = found.brokerUrl;
         qInfo() << "T13: stamped pending connect on host" << computer->name
                 << "after polling resolved it";
     }
@@ -706,13 +745,26 @@ class PendingPairingTask : public QObject, public QRunnable
     Q_OBJECT
 
 public:
-    PendingPairingTask(ComputerManager* computerManager, NvComputer* computer, QString pin)
+    PendingPairingTask(ComputerManager* computerManager, NvComputer* computer, QString pin,
+                       int getServerCertTimeoutMs, bool headless)
         : m_ComputerManager(computerManager),
           m_Computer(computer),
-          m_Pin(pin)
+          m_Pin(pin),
+          m_GetServerCertTimeoutMs(getServerCertTimeoutMs),
+          m_Headless(headless)
     {
-        connect(this, &PendingPairingTask::pairingCompleted,
-                computerManager, &ComputerManager::pairingCompleted);
+        // SmartClassroom T14 — headless (auto-connect) pairing reports through a
+        // private slot so the public pairingCompleted signal stays exclusively
+        // the interactive-pairing channel. ComputerModel / CLI pair listen to
+        // it and would otherwise raise a duplicate error dialog.
+        if (m_Headless) {
+            connect(this, &PendingPairingTask::pairingCompleted,
+                    computerManager, &ComputerManager::scHandleHeadlessPairingResult);
+        }
+        else {
+            connect(this, &PendingPairingTask::pairingCompleted,
+                    computerManager, &ComputerManager::pairingCompleted);
+        }
     }
 
 signals:
@@ -724,7 +776,8 @@ private:
         NvPairingManager pairingManager(m_Computer);
 
         try {
-           NvPairingManager::PairState result = pairingManager.pair(m_Computer->appVersion, m_Pin, m_Computer->serverCert);
+           NvPairingManager::PairState result = pairingManager.pair(m_Computer->appVersion, m_Pin, m_Computer->serverCert,
+                                                                     m_GetServerCertTimeoutMs);
            switch (result)
            {
            case NvPairingManager::PairState::PIN_WRONG:
@@ -758,14 +811,283 @@ private:
     ComputerManager* m_ComputerManager;
     NvComputer* m_Computer;
     QString m_Pin;
+    int m_GetServerCertTimeoutMs;
+    bool m_Headless;
 };
 
 void ComputerManager::pairHost(NvComputer* computer, QString pin)
 {
     // Punt to a worker thread to avoid stalling the
     // UI while waiting for pairing to complete
-    PendingPairingTask* pairing = new PendingPairingTask(this, computer, pin);
+    PendingPairingTask* pairing = new PendingPairingTask(this, computer, pin, 0, false);
     QThreadPool::globalInstance()->start(pairing);
+}
+
+// === SmartClassroom T14 — moonlight:// automatic connect (pair + stream) =====
+//
+// A moonlight:// URL stamps a connect token + broker URL on an NvComputer
+// (T13). scEvaluateAutoConnect() is then driven idempotently by host state
+// changes: once the host is online it pairs headlessly via the Broker if
+// needed, finds the "Desktop" app and hands a ready Session to QML to stream.
+// The user types nothing. Any failure ends the flow and leaves the user on
+// the standard PcView UI (the manual fallback).
+
+// Headless pairing: runs the local pairing handshake and the Broker PIN relay
+// concurrently. Whichever leg fails first ends the attempt via
+// autoPairingCompleted(). A successful Broker relay only means the PIN reached
+// the host — the local handshake's completion is authoritative for success.
+void ComputerManager::beginHeadlessPairing(NvComputer* computer)
+{
+    if (computer == nullptr) {
+        return;
+    }
+
+    QString connectToken;
+    QString brokerUrl;
+    {
+        QReadLocker cLock(&computer->lock);
+        connectToken = computer->pendingConnectToken;
+        brokerUrl = computer->pendingBrokerUrl;
+    }
+
+    if (connectToken.isEmpty() || brokerUrl.isEmpty()) {
+        qWarning() << "T14: beginHeadlessPairing missing connect token or broker URL for"
+                   << computer->name;
+        emit autoPairingCompleted(computer, false, QStringLiteral("missing_connect_context"));
+        return;
+    }
+
+    if (m_AutoPairingComputer != nullptr) {
+        qWarning() << "T14: headless pairing already in progress for"
+                   << m_AutoPairingComputer->name << "— ignoring request for" << computer->name;
+        emit autoPairingCompleted(computer, false, QStringLiteral("pairing_in_progress"));
+        return;
+    }
+
+    const QString pin = generatePinString();
+    m_AutoPairingComputer = computer;
+
+    qInfo() << "T14: starting headless pairing for" << computer->name;
+
+    // Start the local pairing handshake first so the host has an open pairing
+    // session by the time the Broker relays the PIN to its /api/pin endpoint.
+    // The bounded phase-1 timeout keeps a never-arriving PIN from hanging
+    // Moonlight; the headless flag routes completion to scHandleHeadless-
+    // PairingResult instead of the interactive pairingCompleted signal.
+    PendingPairingTask* pairing = new PendingPairingTask(
+        this, computer, pin, SC_HEADLESS_GETSERVERCERT_TIMEOUT_MS, true);
+    QThreadPool::globalInstance()->start(pairing);
+
+    // Then ask the Broker to relay this PIN to the host's Sunshine instance.
+    m_ScBrokerClient->requestPairing(brokerUrl, connectToken, pin);
+}
+
+void ComputerManager::scHandleHeadlessPairingResult(NvComputer* computer, QString error)
+{
+    // Only headless completions reach this slot. Ignore an orphaned handshake
+    // whose attempt was already abandoned (Broker relay failed first, or the
+    // overall auto-connect timed out) — m_AutoPairingComputer is cleared then.
+    if (computer != m_AutoPairingComputer) {
+        return;
+    }
+
+    m_AutoPairingComputer = nullptr;
+
+    if (error.isEmpty()) {
+        qInfo() << "T14: headless pairing succeeded for" << computer->name;
+        emit autoPairingCompleted(computer, true, QString());
+    }
+    else {
+        qWarning() << "T14: headless pairing failed for" << computer->name << "—" << error;
+        emit autoPairingCompleted(computer, false, error);
+    }
+}
+
+void ComputerManager::scHandleBrokerPairingRelayed(bool success, QString reason)
+{
+    if (m_AutoPairingComputer == nullptr) {
+        return;
+    }
+
+    if (success) {
+        // The PIN reached the host. The local handshake is now authoritative —
+        // wait for its completion via scHandleHeadlessPairingResult().
+        qInfo() << "T14: Broker relayed PIN for" << m_AutoPairingComputer->name;
+        return;
+    }
+
+    // The Broker relay failed, so no PIN will reach the host. End the attempt
+    // now rather than waiting out the phase-1 timeout. The orphaned pairing
+    // handshake will fail on its own (bounded by SC_HEADLESS_GETSERVERCERT_-
+    // TIMEOUT_MS) and its later completion is ignored because
+    // m_AutoPairingComputer is cleared here.
+    NvComputer* computer = m_AutoPairingComputer;
+    m_AutoPairingComputer = nullptr;
+    qWarning() << "T14: Broker pairing relay failed for" << computer->name << "—" << reason;
+    emit autoPairingCompleted(computer, false, QStringLiteral("broker_relay:") + reason);
+}
+
+void ComputerManager::scClearPendingConnect(NvComputer* computer)
+{
+    if (computer == nullptr) {
+        return;
+    }
+    QWriteLocker cLock(&computer->lock);
+    computer->pendingConnectToken.clear();
+    computer->pendingHostId = 0;
+    computer->pendingBrokerUrl.clear();
+}
+
+// Idempotent auto-connect driver. Called on every host state change and right
+// after a connect token is stamped on a known host. Advances the flow when the
+// host is ready; otherwise returns and waits for the next state change.
+void ComputerManager::scEvaluateAutoConnect(NvComputer* computer)
+{
+    if (computer == nullptr) {
+        return;
+    }
+
+    // Cheap first pass: is this even an auto-connect target we should act on?
+    bool hasToken;
+    bool online;
+    QString hostName;
+    {
+        QReadLocker cLock(&computer->lock);
+        hasToken = !computer->pendingConnectToken.isEmpty();
+        online = computer->state == NvComputer::CS_ONLINE;
+        hostName = computer->name;
+    }
+    if (!hasToken) {
+        return;
+    }
+    if (m_AutoConnectComputer != nullptr && m_AutoConnectComputer != computer) {
+        // A different auto-connect already owns the flow.
+        return;
+    }
+    // Requiring CS_ONLINE also defers the very first evaluation safely past
+    // ComputerManager construction: no host is online until polling (which
+    // main.qml starts), so main.qml is always connected to our signals before
+    // autoConnectStarted() can fire.
+    if (!online) {
+        return;
+    }
+
+    // It's a live target — snapshot pairing state and look for the app.
+    bool paired;
+    int appIndex = -1;
+    NvApp chosenApp;
+    {
+        QReadLocker cLock(&computer->lock);
+        paired = computer->pairState == NvComputer::PS_PAIRED;
+        for (int i = 0; i < computer->appList.size(); i++) {
+            if (computer->appList[i].name.toLower() == QLatin1String("desktop")) {
+                appIndex = i;
+                break;
+            }
+        }
+        if (appIndex < 0 && !computer->appList.isEmpty()) {
+            // Sunshine always exposes "Desktop"; this is a safety net for a
+            // non-standard host config (T20 deployment keeps the default app).
+            appIndex = 0;
+        }
+        if (appIndex >= 0) {
+            chosenApp = computer->appList[appIndex];
+        }
+    }
+
+    if (m_AutoConnectState == ScAcIdle) {
+        m_AutoConnectComputer = computer;
+        m_AutoConnectTimer->start(SC_AUTOCONNECT_TIMEOUT_MS);
+        emit autoConnectStarted(hostName);
+        qInfo() << "T14: auto-connect started for" << hostName
+                << (paired ? "(already paired)" : "(needs pairing)");
+        if (!paired) {
+            m_AutoConnectState = ScAcPairing;
+            emit autoConnectStageChanged(tr("Pairing with %1...").arg(hostName));
+            beginHeadlessPairing(computer);
+            return;
+        }
+        m_AutoConnectState = ScAcWaitingForApps;
+        emit autoConnectStageChanged(tr("Loading app list..."));
+        // Fall through to the ScAcWaitingForApps handling below.
+    }
+
+    if (m_AutoConnectState == ScAcWaitingForApps) {
+        if (appIndex < 0) {
+            // App list not fetched yet. The next poll populates it and
+            // re-drives this evaluator; the timeout guard covers a stuck host.
+            return;
+        }
+        scStartAutoStream(computer, chosenApp);
+    }
+}
+
+void ComputerManager::scStartAutoStream(NvComputer* computer, NvApp app)
+{
+    m_AutoConnectTimer->stop();
+    m_AutoConnectState = ScAcIdle;
+    m_AutoConnectComputer = nullptr;
+
+    // Consume the token so a subsequent poll's computerStateChanged doesn't
+    // re-trigger the flow while we're already streaming.
+    scClearPendingConnect(computer);
+
+    qInfo() << "T14: auto-connect streaming" << app.name << "from" << computer->name;
+    Session* session = new Session(computer, app, m_Prefs);
+    emit autoStreamSessionReady(app.name, session);
+}
+
+void ComputerManager::scFailAutoConnect(QString message)
+{
+    m_AutoConnectTimer->stop();
+    NvComputer* computer = m_AutoConnectComputer;
+    m_AutoConnectState = ScAcIdle;
+    m_AutoConnectComputer = nullptr;
+
+    // Drop the token so the failed flow doesn't loop on every future poll.
+    scClearPendingConnect(computer);
+
+    qWarning() << "T14: auto-connect failed —" << message;
+    emit autoConnectFailed(message);
+}
+
+void ComputerManager::scHandleAutoPairingCompleted(NvComputer* computer, bool success, QString reason)
+{
+    if (m_AutoConnectState != ScAcPairing || computer != m_AutoConnectComputer) {
+        return;
+    }
+    if (!success) {
+        scFailAutoConnect(tr("Pairing failed (%1)").arg(reason));
+        return;
+    }
+    qInfo() << "T14: auto-connect paired" << computer->name << "— waiting for app list";
+    m_AutoConnectState = ScAcWaitingForApps;
+    emit autoConnectStageChanged(tr("Loading app list..."));
+    // pairState/appList refresh on the next poll; re-drive now in case a poll
+    // already landed.
+    scEvaluateAutoConnect(computer);
+}
+
+void ComputerManager::scHandleAutoConnectTimeout()
+{
+    if (m_AutoConnectState == ScAcIdle) {
+        return;
+    }
+    scFailAutoConnect(tr("Timed out connecting to the PC"));
+}
+
+void ComputerManager::cancelAutoConnect()
+{
+    if (m_AutoConnectState == ScAcIdle) {
+        return;
+    }
+    m_AutoConnectTimer->stop();
+    NvComputer* computer = m_AutoConnectComputer;
+    m_AutoConnectState = ScAcIdle;
+    m_AutoConnectComputer = nullptr;
+    scClearPendingConnect(computer);
+    qInfo() << "T14: auto-connect canceled by user";
+    // No autoConnectFailed — the QML popup's Cancel handler closes itself.
 }
 
 class PendingQuitTask : public QObject, public QRunnable

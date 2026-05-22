@@ -20,6 +20,8 @@
 #include <QPointer>
 
 class ComputerManager;
+class ScBrokerClient;
+class Session;
 
 class DelayedFlushThread : public QThread
 {
@@ -235,6 +237,10 @@ public:
 
     void pairHost(NvComputer* computer, QString pin);
 
+    // SmartClassroom T14 — abort an in-progress moonlight:// auto-connect (the
+    // QML progress popup's Cancel button). No-op when nothing is running.
+    Q_INVOKABLE void cancelAutoConnect();
+
     void quitRunningApp(NvComputer* computer);
 
     QVector<NvComputer*> getComputers();
@@ -246,24 +252,40 @@ public:
 
     void clientSideAttributeUpdated(NvComputer* computer);
 
-    // SmartClassroom T13 — moonlight:// connect entry point. If `address` is
-    // already in m_KnownHosts the broker token / host-id are stamped on the
-    // matching NvComputer immediately; otherwise addNewHost is invoked and
-    // the (token, hostId) are stashed in m_PendingTokensByAddress so the
-    // computerStateChanged callback below can stamp them once polling
-    // resolves the host.
-    void requestConnect(QString address, int port, QString connectToken, int hostId);
+    // SmartClassroom T13/T14 — moonlight:// connect entry point. If `address`
+    // is already in m_KnownHosts the broker connect context (token / host-id /
+    // broker URL) is stamped on the matching NvComputer immediately; otherwise
+    // addNewHost is invoked and the context is stashed in
+    // m_PendingTokensByAddress so the computerStateChanged callback below can
+    // stamp it once polling resolves the host.
+    void requestConnect(QString address, int port, QString connectToken, int hostId,
+                        QString brokerUrl);
 
     // Stash a connect request received before any ComputerManager instance
     // exists. main.cpp calls this from the ConnectRequested switch arm; the
     // QML singleton lambda constructs ComputerManager later, and the
     // constructor flushes any stashed requests onto the live instance.
-    static void stashPendingConnect(QString address, int port, QString connectToken, int hostId);
+    static void stashPendingConnect(QString address, int port, QString connectToken,
+                                    int hostId, QString brokerUrl);
 
 signals:
     void computerStateChanged(NvComputer* computer);
 
     void pairingCompleted(NvComputer* computer, QString error);
+
+    // SmartClassroom T14 — terminal result of a headless pairing attempt.
+    // success=false carries a short machine-readable reason for logging /
+    // fallback ("broker_relay:<code>" when the Broker relay failed, otherwise
+    // the NvPairingManager error string). Internal to the auto-connect flow.
+    void autoPairingCompleted(NvComputer* computer, bool success, QString reason);
+
+    // SmartClassroom T14 — moonlight:// auto-connect progress. main.qml drives
+    // the modal progress popup off these and pushes StreamSegue when the
+    // Session is ready; on failure the user is left on the standard PcView UI.
+    void autoConnectStarted(QString hostName);
+    void autoConnectStageChanged(QString stage);
+    void autoConnectFailed(QString message);
+    void autoStreamSessionReady(QString appName, Session* session);
 
     void computerAddCompleted(QVariant success, QVariant detectedPortBlocking);
 
@@ -275,6 +297,15 @@ private slots:
     void handleComputerStateChanged(NvComputer* computer);
 
     void handleMdnsServiceResolved(MdnsPendingComputer* computer, QVector<QHostAddress>& addresses);
+
+    // SmartClassroom T14 — headless pairing + auto-connect coordination.
+    void scHandleHeadlessPairingResult(NvComputer* computer, QString error);
+
+    void scHandleBrokerPairingRelayed(bool success, QString reason);
+
+    void scHandleAutoPairingCompleted(NvComputer* computer, bool success, QString reason);
+
+    void scHandleAutoConnectTimeout();
 
 private:
     void saveHosts();
@@ -306,6 +337,7 @@ private:
         int port;
         QString connectToken;
         int hostId;
+        QString brokerUrl;
     };
     QMutex m_PendingConnectLock;
     QMap<QString, PendingConnect> m_PendingTokensByAddress;  // key: "ip:port"
@@ -317,4 +349,25 @@ private:
     static QMutex s_StashedConnectsLock;
     static QList<PendingConnect> s_StashedConnects;
     static QPointer<ComputerManager> s_ActiveInstance;
+
+    // SmartClassroom T14 — headless pairing + moonlight:// auto-connect.
+    // All of this state is touched only on the main thread (beginHeadlessPairing,
+    // scEvaluateAutoConnect and every sc* slot run there), so no extra locking.
+    enum ScAutoConnectState {
+        ScAcIdle,           // no auto-connect in progress
+        ScAcPairing,        // headless pairing handshake + Broker relay in flight
+        ScAcWaitingForApps, // host paired; waiting for the app-list poll
+    };
+
+    void beginHeadlessPairing(NvComputer* computer);
+    void scEvaluateAutoConnect(NvComputer* computer);
+    void scStartAutoStream(NvComputer* computer, NvApp app);
+    void scFailAutoConnect(QString message);
+    void scClearPendingConnect(NvComputer* computer);
+
+    ScBrokerClient* m_ScBrokerClient = nullptr;
+    NvComputer* m_AutoPairingComputer = nullptr;
+    ScAutoConnectState m_AutoConnectState = ScAcIdle;
+    NvComputer* m_AutoConnectComputer = nullptr;
+    QTimer* m_AutoConnectTimer = nullptr;
 };
