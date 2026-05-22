@@ -179,6 +179,7 @@ SOURCES += \
     backend/nvhttp.cpp \
     backend/nvpairingmanager.cpp \
     backend/computermanager.cpp \
+    backend/scbrokerclient.cpp \
     backend/boxartmanager.cpp \
     backend/richpresencemanager.cpp \
     cli/commandlineparser.cpp \
@@ -221,6 +222,7 @@ HEADERS += \
     backend/nvhttp.h \
     backend/nvpairingmanager.h \
     backend/computermanager.h \
+    backend/scbrokerclient.h \
     backend/boxartmanager.h \
     backend/richpresencemanager.h \
     cli/commandlineparser.h \
