@@ -331,7 +331,7 @@ static QStringList scT13ExpandMoonlightConnectUrl(const QStringList& args)
         const QString hostId = q.queryItemValue("host-id");
         const QString host   = q.queryItemValue("host");
         const QString port   = q.queryItemValue("port");
-        const QString broker = q.queryItemValue("broker");
+        const QString broker = q.queryItemValue("broker", QUrl::FullyDecoded);
         if (host.isEmpty()) {
             qWarning() << "moonlight:// URL missing host parameter:" << arg;
             continue;
@@ -446,7 +446,7 @@ static void scT13DispatchMoonlightUrl(const QUrl& url)
     const QString host   = q.queryItemValue("host");
     const QString hostId = q.queryItemValue("host-id");
     const QString port   = q.queryItemValue("port");
-    const QString broker = q.queryItemValue("broker");
+    const QString broker = q.queryItemValue("broker", QUrl::FullyDecoded);
     if (host.isEmpty()) {
         qWarning() << "T13: moonlight:// URL missing host parameter:" << url.toString();
         return;
