@@ -124,6 +124,12 @@ public:
 
     void flushWindowEvents();
 
+    // SmartClassroom T14 후속 0013 — 종료 확인 다이얼로그 요청. 어느 스레드서든 호출 가능
+    // (SdlInputHandler의 Ctrl+Alt+Shift+Q 경로 등). SDL_USEREVENT를 push해 execInternal
+    // 루프 스레드가 네이티브 다이얼로그를 띄우게 한다 — video subsystem을 init한 스레드에서
+    // 호출해야 안전하므로.
+    void scRequestTerminateConfirm();
+
 signals:
     void stageStarting(QString stage);
 
@@ -277,6 +283,14 @@ private:
     Uint32 m_DropAudioEndTime;
 
     Overlay::OverlayManager m_OverlayManager;
+
+    // SmartClassroom T14 후속 0012/0013 — 네이티브 종료 확인 다이얼로그(Windows TaskDialog /
+    // SDL_ShowMessageBox 폴백). 명시 종료(단축키 Ctrl+Alt+Shift+Q, 호스트 셧다운 0016)에서만
+    // 표시 — cleanup_starts_at(10분 전) 자동 진입은 서버(T09)가 cleanup하므로 클라 타이머 없음.
+    // m_ScTerminateDialogActive: 다이얼로그 표시 중 재진입 가드.
+    bool m_ScTerminateDialogActive;
+
+    void scShowTerminateConfirmDialog();
 
     static CONNECTION_LISTENER_CALLBACKS k_ConnCallbacks;
     static Session* s_ActiveSession;

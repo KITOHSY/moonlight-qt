@@ -26,6 +26,10 @@
 #ifdef Q_OS_WIN32
 #include <SDL_syswm.h>
 #include <dwmapi.h>
+// SmartClassroom T14 후속 0013/0014 — Windows 네이티브 종료 확인 다이얼로그(TaskDialogIndirect).
+// manifest는 빌드 시 Common-Controls v6를 이미 포함(Moonlight.exe.manifest).
+#include <commctrl.h>
+#pragma comment(lib, "comctl32.lib")
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE_OLD
 #define DWMWA_USE_IMMERSIVE_DARK_MODE_OLD 19
 #endif
@@ -40,6 +44,9 @@
 #define SDL_CODE_GAMECONTROLLER_RUMBLE_TRIGGERS 102
 #define SDL_CODE_GAMECONTROLLER_SET_MOTION_EVENT_STATE 103
 #define SDL_CODE_GAMECONTROLLER_SET_CONTROLLER_LED 104
+// SmartClassroom T14 후속 0013 — 종료 확인 다이얼로그 요청(단축키 경로가 push,
+// execInternal 루프 스레드가 SDL_ShowMessageBox 표시 → 스레드 안전).
+#define SDL_CODE_SC_TERMINATE_CONFIRM 105
 
 #include <openssl/rand.h>
 
@@ -556,8 +563,128 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_OpusDecoder(nullptr),
       m_AudioRenderer(nullptr),
       m_AudioSampleCount(0),
-      m_DropAudioEndTime(0)
+      m_DropAudioEndTime(0),
+      m_ScTerminateDialogActive(false)
 {
+}
+
+void Session::scRequestTerminateConfirm()
+{
+    // 어느 스레드서든 호출 가능 — SDL_USEREVENT push로 execInternal 루프 스레드가 표시.
+    SDL_Event event = {};
+    event.type = SDL_USEREVENT;
+    event.user.code = SDL_CODE_SC_TERMINATE_CONFIRM;
+    SDL_PushEvent(&event);
+}
+
+namespace {
+
+// T14 후속 0013/0014 — 종료 확인 다이얼로그. confirmed(=종료 선택) 여부 반환.
+// 비-Windows + TaskDialog 실패 시 폴백. 안전 기본값: Enter·Esc 모두 취소.
+bool scTerminateConfirmViaSdl(SDL_Window* window)
+{
+    const SDL_MessageBoxButtonData buttons[] = {
+        { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "취소" },
+        { 0, 1, "종료" },
+    };
+    const SDL_MessageBoxData mbox = {
+        SDL_MESSAGEBOX_WARNING, window, "Moonlight",
+        "예약 시간 종료 전 종료하시겠습니까?\n사용권이 반납되고 저장하지 않은 파일은 자동 삭제됩니다.",
+        SDL_arraysize(buttons), buttons, nullptr,
+    };
+    int buttonId = -1;
+    if (SDL_ShowMessageBox(&mbox, &buttonId) != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "T14: SDL_ShowMessageBox failed: %s", SDL_GetError());
+        return false;
+    }
+    return buttonId == 1;
+}
+
+#ifdef Q_OS_WIN32
+// Windows 10/11 네이티브 TaskDialog — 큰 제목 + 본문 + 둥근 버튼 + 경고 아이콘.
+// 부모 = 스트림 창(TDF_POSITION_RELATIVE_TO_WINDOW로 그 위 중앙). 실패 시 SDL 폴백.
+bool scTerminateConfirmViaTaskDialog(SDL_Window* window)
+{
+    HWND hwnd = nullptr;
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    if (SDL_GetWindowWMInfo(window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WINDOWS) {
+        hwnd = wmInfo.info.win.window;
+    }
+
+    // §11 A14 P5 카피. QStringLiteral(소스 UTF-8, /utf-8 빌드) → UTF-16 wstring.
+    const std::wstring title       = QStringLiteral("Moonlight").toStdWString();
+    const std::wstring instruction = QStringLiteral("예약 시간 종료 전 종료하시겠습니까?").toStdWString();
+    const std::wstring content     = QStringLiteral(
+        "사용권이 반납되고 저장하지 않은 파일은 자동 삭제됩니다.\n"
+        "재이용은 새 예약 또는 빈 PC 즉시 사용으로 가능합니다.").toStdWString();
+    const std::wstring quitText    = QStringLiteral("종료").toStdWString();
+    const std::wstring cancelText  = QStringLiteral("취소").toStdWString();
+
+    TASKDIALOG_BUTTON buttons[2];
+    buttons[0].nButtonID = IDYES;
+    buttons[0].pszButtonText = quitText.c_str();
+    buttons[1].nButtonID = IDNO;
+    buttons[1].pszButtonText = cancelText.c_str();
+
+    TASKDIALOGCONFIG config;
+    SecureZeroMemory(&config, sizeof(config));
+    config.cbSize = sizeof(config);
+    config.hwndParent = hwnd;
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+    config.pszWindowTitle = title.c_str();
+    config.pszMainIcon = TD_WARNING_ICON;
+    config.pszMainInstruction = instruction.c_str();
+    config.pszContent = content.c_str();
+    config.pButtons = buttons;
+    config.cButtons = ARRAYSIZE(buttons);
+    config.nDefaultButton = IDNO;   // 안전 기본값 = 취소(Enter/Esc).
+
+    int pressed = 0;
+    HRESULT hr = TaskDialogIndirect(&config, &pressed, nullptr, nullptr);
+    if (FAILED(hr)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "T14: TaskDialogIndirect failed (0x%08lx) — falling back to SDL",
+                    (unsigned long)hr);
+        return scTerminateConfirmViaSdl(window);
+    }
+    return pressed == IDYES;
+}
+#endif
+
+} // namespace
+
+void Session::scShowTerminateConfirmDialog()
+{
+    // execInternal 루프 스레드에서만 호출 — 네이티브 다이얼로그는 블로킹이라 표시 동안
+    // 비디오 렌더가 멈추지만 종료 확인이므로 수용. 닫힌 뒤 큐에 쌓인 중복 요청은
+    // 재진입 가드 + 1회성 플래그로 흡수.
+    if (m_ScTerminateDialogActive) {
+        return;
+    }
+    m_ScTerminateDialogActive = true;
+
+#ifdef Q_OS_WIN32
+    const bool confirmed = scTerminateConfirmViaTaskDialog(m_Window);
+#else
+    const bool confirmed = scTerminateConfirmViaSdl(m_Window);
+#endif
+
+    m_ScTerminateDialogActive = false;
+
+    if (confirmed) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "T14: terminate confirmed via dialog");
+        // TODO(Stage B): ScBrokerClient::reportExplicitTermination(reservationId,
+        //   reason "user_modal"|"shortcut"|"host_shutdown") → Broker POST /terminate.
+        SDL_Event quitEvent = {};
+        quitEvent.type = SDL_QUIT;
+        quitEvent.quit.timestamp = SDL_GetTicks();
+        SDL_PushEvent(&quitEvent);
+    }
+    else {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "T14: terminate cancelled via dialog");
+    }
 }
 
 bool Session::initialize()
@@ -2011,6 +2138,11 @@ void Session::execInternal()
                 break;
             case SDL_CODE_FLUSH_WINDOW_EVENT_BARRIER:
                 m_FlushingWindowEventsRef--;
+                break;
+            case SDL_CODE_SC_TERMINATE_CONFIRM:
+                // T14 후속 0013 — 단축키(Ctrl+Alt+Shift+Q) 등이 push한 종료 확인 요청을
+                // 이 스레드에서 처리(SDL_ShowMessageBox는 video subsystem 스레드 전제).
+                scShowTerminateConfirmDialog();
                 break;
             case SDL_CODE_GAMECONTROLLER_RUMBLE:
                 m_InputHandler->rumble((uint16_t)(uintptr_t)event.user.data1,

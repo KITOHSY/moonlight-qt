@@ -20,11 +20,13 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Detected quit key combo");
 
-        // Push a quit event to the main loop
-        SDL_Event event;
-        event.type = SDL_QUIT;
-        event.quit.timestamp = SDL_GetTicks();
-        SDL_PushEvent(&event);
+        // SmartClassroom T14 후속 0013 — 즉시 SDL_QUIT 대신 네이티브 종료 확인 다이얼로그를
+        // 요청한다. SDL_USEREVENT push → execInternal 루프가 SDL_ShowMessageBox 표시.
+        // [종료] → 기존 quit 경로, [취소] → 세션 유지. 0015 머지 후 [종료]가 Broker
+        // POST /terminate 라우트도 호출.
+        if (Session::get() != nullptr) {
+            Session::get()->scRequestTerminateConfirm();
+        }
         break;
 
     case KeyComboUngrabInput:
